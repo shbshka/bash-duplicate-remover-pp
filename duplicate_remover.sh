@@ -9,6 +9,7 @@ log() {
 
 log "INFO" "Process started."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_PARAMETERS="dry-run | prompt | auto"
 
 #Abort when no directory
 if [ -z "$1" ]; then
@@ -25,7 +26,7 @@ mkdir -p "$TRASH_DIR"
 # Abort if invvalid run option
 if [[ ! "$RUN_OPTION" =~ ^(dry-run|prompt|auto)$ ]]; then
     log "ERROR" "Invalid run option: '$RUN_OPTION'"
-    echo "Available run options: dry-run | prompt | auto (default: dry-run)"
+    echo "Available run options: $RUN_PARAMETERS (default: dry-run)"
     exit 1
 fi
 
@@ -59,8 +60,7 @@ function prompt_user() {
     case "$choice" in
         1)  
             if [[ -e "$1" ]]; then
-                mv "$1" "$TRASH_DIR
-            /" && log "INFO" "Moved $1 to Trash"
+                mv "$1" "$TRASH_DIR/" && log "INFO" "Moved $1 to Trash"
             else
                 log "ERROR" "Cannot delete $1: File not found"
             fi
@@ -103,32 +103,60 @@ function prompt_user() {
     esac
 }
 
-#Iterate and process accordingly
-while IFS= read -r -d '' file; do
-    hash=$(md5sum "$file" | awk '{print $1}')
-    if [[ -n "${seen_hashes[$hash]}" ]]; then
-        log "INFO" "Duplicate: $file (equals ${seen_hashes[$hash]})"
-        prompt_user "$file" "${seen_hashes[$hash]}"
-    else
-        seen_hashes["$hash"]="$file"
+process_duplicates() {
+    local mode="$1"
+    while IFS= read -r -d '' file; do
+        hash=$(md5sum "$file" | awk '{print $1}')
+        if [[ -n "${seen_hashes[$hash]}" ]]; then
+            log "INFO" "Duplicate: $file (equals ${seen_hashes[$hash]})"
+            case "$mode" in
+                prompt)
+                    prompt_user "$file" "${seen_hashes[$hash]}"
+                    ;;
+                auto)
+                    rm "$file" && log "INFO" "Deleted $file"
+                    ;;
+                dry-run)
+                    mv "$file" "$TRASH_DIR/" && log "INFO" "Moved $file to Trash"
+                    ;;
+            esac
+        else
+            seen_hashes["$hash"]="$file"
+        fi
+    done < <(find "$TARGET_DIR" -type f -print0)
+}
+
+
+if [ "$RUN_OPTION" = "prompt" ]; then
+    process_duplicates "prompt"
+
+    if [ "$(ls -A "$TRASH_DIR/")" ]; then
+        xdg-open "$TRASH_DIR/" >> duplicate_remover.log 2>&1 & echo "Review the deletions."
+        read -p "Press Enter after reviewing the files..." < /dev/tty
+
+        read -p "Empty Trash? (y/n) " choice < /dev/tty
+        case "$choice" in
+            y)
+                rm -r "$TRASH_DIR/"
+                log "INFO" "Trash folder emptied"
+                ;;
+            n)
+                log "INFO" "Aborted emptying Trash. You can empty it manually later."
+                ;;
+            *)
+                log "WARNING" "Invalid choice: $choice"
+                ;;
+        esac
     fi
-done < <(find "$TARGET_DIR" -type f -print0)
 
-#Confirm changes
-if [ "$(ls -A "$TRASH_DIR/")" ]; then
-    xdg-open "$TRASH_DIR/" >> duplicate_remover.log 2>&1 & echo "Review the deletions."
-    read -p "Press Enter after reviewing the files..." < /dev/tty
-
-    read -p "Empty Trash? (y/n)" choice < /dev/tty
-
-    case "$choice" in
-        y) 
-            rm -r "$TRASH_DIR/"
-            log "INFO" "Trash folder emptied"
-            ;;
-        n) log "INFO" "Aborted emptying Trash. You can empty it manually later." ;;
-        *) log "WARNING" "Invalid choice: $choice" ;;
-    esac
+elif [ "$RUN_OPTION" = "auto" ]; then
+    process_duplicates "auto"
+    log "INFO" "Deleted all duplicate files"
+else
+    process_duplicates "dry-run"
+    echo "To use other run options, type $RUN_PARAMETERS"
+    log "INFO" "Moved all found files to $TRASH_DIR"
 fi
 
-log "INFO" "Duplicate removal complete."
+
+log "INFO" "Duplicate processing complete."
